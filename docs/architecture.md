@@ -37,7 +37,7 @@
 │   ②信任根：keyring 凭据、插件验签、信任密钥库                        │
 │   ③AI 工具层：tool registry、权限投影、审批、审计、LLM 循环、MCP      │
 ├────────────────────────────────────────────────────────────────────┤
-│ Java 服务  (stdio JSON-RPC, JRE 17, 单进程)                         │
+│ Java 服务  (stdio JSON-RPC, JRE 21, 单进程)                         │
 │   驱动、连接池、会话/事务、元数据、方言、类型映射、迁移引擎、SSH 隧道  │
 │   插件装载（每插件独立 ClassLoader）                                 │
 └────────────────────────────────────────────────────────────────────┘
@@ -274,6 +274,15 @@ public interface RecordWriter extends AutoCloseable { WriteResult write(List<Obj
 - **不注册到 `java.sql.DriverManager`**：它是全局静态表，会让插件之间的驱动互相可见（两个版本的同一驱动共存时尤其致命）。连接一律用插件自己的 `Driver` 实例直接 `driver.connect(url, props)`，绕开全局注册表。
 - 插件调用全部包在 try/catch + 超时执行器里；同一插件连续失败 N 次 → 标 `quarantined`，从能力列表摘除，其他库不受影响。
 - **安装/升级后重启服务进程**（约 2s），不做热卸载（ADR-006）。
+
+**两种插件的注册方式（反射只是实现细节，契约是 SPI）**：
+
+| 形态 | 包内容 | 注册路径 |
+|---|---|---|
+| **A. 纯驱动** | manifest + JDBC 驱动 jar | manifest 声明的 `driverClass` → `Class.forName(name, true, pluginLoader)` → `newInstance()` 取 `java.sql.Driver`，交给通用 SQL 适配器（**无插件代码**） |
+| **B. SPI 插件** | manifest + 驱动 jar + 插件 jar | 插件 jar 内 `META-INF/services/com.oxdb.plugin.ConnectorPlugin`（一行：实现类全名）→ `ServiceLoader.load(ConnectorPlugin.class, pluginLoader)` |
+
+三条实现禁令：① **不扫描 jar 找注解**（慢、脆、无编译期校验，且无法声明版本/能力）；② `ServiceLoader` 必须**显式传 `pluginLoader`**，不许用 `Thread.currentThread().getContextClassLoader()`——默认指向宿主，会加载成"两个长得一样但不兼容的类"（`instanceof` 为 false，极难排查）；③ **不 `setAccessible(true)`**，插件只许用 `dbdesk-plugin-api` 的 public 面（Java 21 对封装更严格）。
 
 ### 4.6 签名与信任链（没有沙箱，只有签名 + 知情同意）
 
@@ -574,7 +583,7 @@ apps/desktop/            # Tauri 2：src-tauri/（Rust 宿主）+ src/（React U
 crates/host-core/        # sidecar 监管、stdio 客户端、策略、tools、mcp、audit
 crates/host-cli/         # dbdesk-cli（无头：transfer/query/export）
 contracts/               # JSON Schema：methods/*、tools/*、plugin-manifest、job、approval
-backend/                 # Maven（Java 17）
+backend/                 # Maven（Java 21）
   ├── plugin-api/        # 瘦 jar：SPI + DTO，零依赖
   ├── core/              # stdio 分发、会话/池、SqlGuard、迁移引擎、SSH
   └── plugins/           # mysql / postgres / redis / mongo（各自独立 module）
@@ -586,12 +595,44 @@ scripts/                 # 构建、jlink、打包、验收
 |---|---|
 | Rust | `tauri 2`, `tokio`, `serde`, `rmcp`, `ed25519-dalek`, `keyring`, `rusqlite`, `tracing`, `reqwest` |
 | Web | React + TypeScript + Vite, **AG Grid Community (MIT)**, CodeMirror 6, zustand, i18next, json-schema-to-typescript |
-| Java | JDK 17, Jackson, HikariCP, mysql-connector-j, postgresql, jedis, mongodb-driver-sync, **Apache MINA SSHD**, slf4j+logback, JUnit5 + Testcontainers, shade |
+| Java | JDK 21, Jackson, HikariCP, mysql-connector-j, postgresql, jedis, mongodb-driver-sync, **Apache MINA SSHD**, slf4j+logback, JUnit5 + Testcontainers, shade |
 
 **打包**：Tauri bundler + jlink 定制 JRE（约 45–55MB）→ NSIS/MSI；安装包预算 **130–170MB**（JRE 50 + 驱动 15 + UI 资源 15 + 主程序）。
 **签名**：安装包与更新清单代码签名（EV 证书可避免 SmartScreen 恐吓）；插件与 index 用 Ed25519。
 **WebView2**：Windows 10+ 依赖；安装器内置 evergreen bootstrapper。
 **ADR-007 复述**：插件动态装载与 native-image 冲突，JRE 必须自带。
+
+### 10.1 内置 JRE 与启动（Java 21）
+
+**版本硬约束**：编译 target = 内置 JRE 版本 = **21**，两者不许混搭。"编译 21 跑 17"或"编译 17 跑 21"都会在插件字节码边界炸出 `UnsupportedClassVersionError`；插件 jar 的字节码目标版本同样不得超过 21。
+
+**jlink 模块集**（少一个就在运行期 `NoClassDefFoundError`，且报错误导）：
+
+```
+java.base, java.sql, java.naming, java.management,
+java.security.jgss, jdk.crypto.ec, jdk.zipfs, jdk.unsupported
+```
+
+- `jdk.unsupported` 必须有：大量第三方库用 `sun.misc.Unsafe`，缺了只有运行期才炸。
+- `jdk.crypto.ec` 必须有：JDBC over TLS 的 ECC 套件。
+- `java.security.jgss`：Kerberos 型数据库认证。
+- 裁剪后约 45–55MB（见上文打包预算）。冷启动优化（AppCDS）留到 v0.2，别过早做。
+
+**启动形态：Rust spawn 子进程，不嵌入 JVM**（ADR-001 / ADR-003）。Windows 上建议 `javaw.exe` 或给 spawn 设 `CREATE_NO_WINDOW`，避免黑窗闪现。
+
+```
+resources\jre\bin\java.exe
+  -Dfile.encoding=UTF-8 -Dsun.jnu.encoding=UTF-8    ← 必须
+  -Xmx512m -XX:+ExitOnOutOfMemoryError
+  -cp <服务 jar> com.oxdb.service.Launcher
+```
+
+- **编码必须显式 UTF-8**：Windows 中文环境默认 GBK（本机 `mvn -v` 实测 `platform encoding: GBK`），不设会在 stdio 边界把中文 SQL / JSON / 单元格文本变成乱码，而且英文环境根本测不出来。
+- `-Xmx512m` 不吃满用户机器；`ExitOnOutOfMemoryError` 让 OOM 直接退出、由 Rust 监管重启（与 §8 同一条路径），不带着残缺状态继续服务。
+- **stdout 协议独占**：Launcher 第一件事抢占原始 stdout 并 `System.setOut(System.err)`（§2）。
+- **stdin EOF = 父死子亡**：Rust 关管道即服务退出，不留孤儿。
+
+**JRE 探测顺序**：`resources\jre` 优先 → `DBDESK_JAVA`（仅开发者覆盖与诊断）→ 启动失败**明确报错**。绝不静默退回系统 Java（版本漂移是最难查的一类 bug）；发布说明也不承诺"自带 JRE"以外的 Java 支持。
 
 ---
 
