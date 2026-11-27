@@ -271,17 +271,55 @@ public interface RecordWriter extends AutoCloseable { WriteResult write(List<Obj
 ### 4.5 装载、隔离与隔离带
 
 - 每插件一个 `URLClassLoader`，parent 只暴露 `dbdesk-plugin-api`；插件彼此不可见，也看不见核心内部类。
+- **不注册到 `java.sql.DriverManager`**：它是全局静态表，会让插件之间的驱动互相可见（两个版本的同一驱动共存时尤其致命）。连接一律用插件自己的 `Driver` 实例直接 `driver.connect(url, props)`，绕开全局注册表。
 - 插件调用全部包在 try/catch + 超时执行器里；同一插件连续失败 N 次 → 标 `quarantined`，从能力列表摘除，其他库不受影响。
 - **安装/升级后重启服务进程**（约 2s），不做热卸载（ADR-006）。
 
 ### 4.6 签名与信任链（没有沙箱，只有签名 + 知情同意）
 
 - 包格式 `.dbplugin`（zip）：`manifest.json` + 驱动 jar + `signature.ed25519`。
-- 签名对象 = 规范化清单哈希：`sha256( 排序后的 (路径, 大小, sha256) 列表 )`。
+- 签名对象 = 规范化清单哈希：`sha256( 排序后的 (路径, 大小, sha256) 列表 )`。三条硬约束：① 清单**必须包含 `manifest.json` 自身的内容哈希**（否则"换 manifest 不换 jar"也能过签）；② 排除 `signature.ed25519` 自身；③ **安装期不得改写 `manifest.json` 一个字节**（重排即失效），安装附加信息只写 `install-receipt.json`。
+- 解压必须**拒绝重复条目**（同一路径出现两次会让逐文件哈希校验失效）、拒绝绝对路径与 `..`、拒绝符号链接，并限制条目数与解压总大小（防 zip bomb）。
 - 安装流程（全部在 Rust）：验签 → 校验 `apiVersion` → 显示发布者/能力位/jar 清单/“可读取你的数据库凭据” → 用户确认 → 原子落盘并写 `install-receipt.json`（含哈希）→ 重启服务。
 - 加载时 Java **再验一次哈希**（防安装后被篡改），与 receipt 比对。
 - 信任密钥库 `%APPDATA%\dbdesk\trust.json`：内置官方公钥 + 用户手动添加。
+- **信任模型 v1**：只认官方索引 + 官方签名；第三方插件走"手动导入 `.dbplugin` + 显示发布者指纹 + 知情同意"（开发者模式），公开提交渠道 v0.3 再开。插件**不得依赖其他插件**，只允许依赖 `dbdesk-plugin-api` 与 JDK——否则传递依赖会瓦解 classloader 隔离。
 - 市场 = **签名过的 `index.json`**（插件列表、版本、下载地址、哈希），托管在 GitHub Releases/对象存储；**不自建后端**。代码类插件默认不自动更新。
+
+### 4.7 发布与安装链路（作者 → 市场 → 用户机器）
+
+**作者侧三命令**：
+
+```bash
+dbdesk-plugin pack     # manifest.json + jar → 计算规范化清单哈希
+dbdesk-plugin sign     # 私钥签清单 → 产出 .dbplugin
+dbdesk-plugin publish  # 传 Release asset + 更新（用市场私钥签的）index.json
+```
+
+产物三件：`.dbplugin`（Release asset）、签名的 `index.json`、changelog。`index.json` 每条写全 `pluginId / version / apiVersion / minHost / kind / capabilities / size / sha256 / downloadUrl / signerFingerprint`——宿主先用 index 里的 `sha256` 校验下载物，再验插件签名，**两道各自防不同的攻击**。
+
+**安装链路（全部在 Rust；Java 侧刻意不给出站网络能力）**：
+
+```
+拉 index.json（有缓存，可离线）
+ → 下载到 downloads/（进度、断点续传、超时重试、上限 100MB）
+ → 解压到 plugins/.staging/（zip 白名单 + 大小/条目上限，见 §4.6）
+ → 验签：index 签名 → 插件签名 → 逐 jar 哈希对清单
+ → 闸门：apiVersion 主版本相等、minHost 满足、kind 在能力族内、JDK 版本够
+ → 知情同意（发布者指纹 / 能力位 / jar 清单 / "可读取你的数据库凭据"）
+ → 原子落盘（同盘 rename 到 plugins/<id>/<version>/）+ install-receipt.json
+ → 提示"将重启服务并断开 N 个连接" → 重启服务（约 2s）→ initialize 返回 plugins.list
+```
+
+**"实时"的准确边界**：下载与安装是实时的，**注册不实时**——类装载随服务进程启动（ADR-006），v1 不做进程内懒装载（两条装载路径 = 两类 bug）。体验目标是"点安装 → 闪一下 → 多了个库"，靠**重启服务 2s + 自动重连上次会话**达成。
+
+**重启前必须做的两件事**：① 网格里的 pending changes 先写恢复文件（§8），否则装插件会吞掉用户改了一半的数据；② 连接配置来自 `installed.json`、凭据来自 keyring，服务回来后自动重连（用户可关）。
+
+**失败矩阵**：任一步失败 → 删 staging、`installed.json` 不动、**不重启服务**（盘没换过）；装载失败在 Java 侧记 `failureCount`，≥3 标 `quarantined`，服务照常启动。
+
+**升级与卸载**：升级切 active 并**保留上一版本目录**供快速回滚（只留 1 个）；卸载时若有活跃连接在用 → 强制断开 + 明确提示（或标 `pending-removal` 下次启动删）。代码类插件默认不自动更新。
+
+**离线与企业**：拖拽 `.dbplugin` 走同一条链路（跳过下载）；内网镜像可自签 `index.json`，用户把其公钥加进 `trust.json`。
 
 ---
 
@@ -606,3 +644,4 @@ scripts/                 # 构建、jlink、打包、验收
 8. 同一句话在 UI（`/` 入口）与 MCP 通道执行，产出相同的 intent 序列与相同的权限裁决（§6.0 / §6.8）。
 9. AI 写入未执行的提案时按 Esc，buffer 恢复到原文；人改过提案后 AI 不得整段覆盖（§6.8）。
 10. UI 与 AI 并发操作同一编辑器时，人按键即中断 AI 写入，且已执行结果不丢（§6.0 lease）。
+11. 打包→发布→下载→验签→安装→注册走通一遍（本地百兆网 ≤5s），任一环节失败都不重启服务、不破坏已装版本（§4.7）。
