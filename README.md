@@ -2,7 +2,7 @@
 
 多库桌面客户端 + AI 工具层。
 
-目标形态对标 Navicat：在一个桌面应用里管理 MySQL、PostgreSQL、Redis、MongoDB，并通过插件扩展到 Oracle、SQL Server、达梦等；同时把数据库能力以 MCP 工具的形式开放给 AI 助手——**但 AI 不能自行写入数据库**。
+目标形态对标 Navicat：在一个桌面应用里管理 MySQL、PostgreSQL、Redis、MongoDB，并通过插件扩展到 Oracle、SQL Server、达梦等。**MySQL / PostgreSQL / Redis / MongoDB 本身也是插件**（内置插件随包分发，与第三方插件同一套机制）。同时把数据库能力以 MCP 工具的形式开放给 AI 助手——**但 AI 不能自行写入数据库**。
 
 > **当前状态：架构设计阶段（仓库内只有文档，尚无可运行代码）。**
 > 完整设计见 [`docs/architecture.md`](docs/architecture.md)。
@@ -21,7 +21,7 @@
 
 ## 四条设计原则
 
-1. **插件即连接器**——"支持一种数据库" = 一个插件包（`manifest.json` + 驱动 jar），核心代码里没有 `if (mysql)`；侧边栏、标签页、单元格编辑器由插件声明的能力位驱动。
+1. **插件即连接器**——"支持一种数据库" = 一个插件包（`manifest.json` + 驱动 jar），核心代码里没有 `if (mysql)`；侧边栏、标签页、单元格编辑器由插件声明的能力位驱动。MySQL / PostgreSQL / Redis / MongoDB 全部按插件实现，核心零库专属代码。
 2. **迁移/同步是引擎的两种模式，不是插件**——Job 是 JSON 数据（`full` / `incremental`），CLI 与 UI 同源；插件只负责"读一行/写一行"，框架负责分片、并行、限速、进度、断点与错误策略。
 3. **安全判断在服务端**——只读锁、危险语句拦截、生产环境确认由 Java 侧强制，界面上的"灰按钮"只是提示，改前端绕不过去。
 4. **AI 只能申请，不能执行**——所有 mutating 调用先变成待审批动作，由人在界面批准后才签发 Ed25519 审批令牌（绑定 method + connectionId + 参数哈希 + 过期时间 + 一次性 nonce）。
@@ -40,9 +40,9 @@ contracts/            JSON Schema：RPC 方法、工具描述、插件 manifest�
 
 | 阶段 | 目标 | 预计 |
 |---|---|---|
-| v0.1 骨架 | Tauri 壳 + stdio 客户端 + MySQL/PG 插件 + 连接管理 + 对象树 + 只读网格 + SQL 执行 | 3–4 周 |
-| v0.2 可用 | 内联编辑（事务提交 + 冲突检测）+ 导入导出 + Redis 全功能 + SSH 隧道 + i18n + 历史 | 8–11 周 |
-| v0.3 商业化 | MongoDB + AI 只读助手 + 审批流 + MCP server + 安装器/签名/自动更新 + 插件市场 | 6–8 周 |
+| v0.1 骨架 | Tauri 壳 + stdio 客户端 + MySQL/PG 内置插件 + 连接管理 + 对象树 + 只读网格 + SQL 执行 | 3–4 周 |
+| v0.2 可用 | 内联编辑（事务提交 + 冲突检测）+ 导入导出 + Redis 内置插件全功能 + SSH 隧道 + i18n + 历史 | 8–11 周 |
+| v0.3 商业化 | MongoDB 内置插件补全 + AI 只读助手 + 审批流 + MCP server + 安装器/签名/自动更新 + 插件市场 | 6–8 周 |
 
 ## 开发前置条件
 

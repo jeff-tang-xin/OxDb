@@ -210,6 +210,8 @@ approval = {
 | Feature | 迁移/同步类工作流 | ✗ 由内置引擎承担 |
 | UI | 任意 JS/React | ✗ 永不开放 |
 
+**零库专属代码（硬约束）**：MySQL、PostgreSQL、Redis、MongoDB **全部以插件形式提供**——"内置"只表示随安装包分发，它们与第三方插件走同一套 manifest、SPI、classloader 隔离与验签流程。核心代码不得出现任何库名分支（`if (kind == "mysql")` 一律评审拒绝）；新增一种库 = 新增一个插件包，不改核心、不改 UI。
+
 ### 4.2 SPI 草案（Java，独立瘦 jar `dbdesk-plugin-api`）
 
 ```java
@@ -477,9 +479,9 @@ scripts/                 # 构建、jlink、打包、验收
 
 | 阶段 | 内容 | 参考工期 |
 |---|---|---|
-| **v0.1 走通骨架** | Tauri 壳 + stdio 客户端 + `initialize` + manifest 式 MySQL 插件 + 连接管理 + 对象树 + `db.query` 只读分页 + 网格 + SQL 执行 + 日志面板 + CI 构建 | 3–4 周 |
-| **v0.2 可日常用** | 内联编辑（pending changes + 审批令牌）+ 导入导出（file 插件 + transfer 引擎）+ Redis 全功能 + SSH 隧道 + i18n + 历史 + 插件安装/验签 + prod 护栏 | 8–11 周 |
-| **v0.3 商业化** | Mongo + AI 只读助手 → 审批流 + MCP Server + 多模型；安装器/jlink/签名/自动更新；插件市场 UI；文档与验收矩阵 | 6–8 周 |
+| **v0.1 走通骨架** | Tauri 壳 + stdio 客户端 + `initialize` + manifest 式 MySQL / PostgreSQL 内置插件 + 连接管理 + 对象树 + `db.query` 只读分页 + 网格 + SQL 执行 + 日志面板 + CI 构建 | 3–4 周 |
+| **v0.2 可日常用** | 内联编辑（pending changes + 审批令牌）+ 导入导出（file 插件 + transfer 引擎）+ Redis 内置插件全功能 + SSH 隧道 + i18n + 历史 + 插件安装/验签 + prod 护栏 | 8–11 周 |
+| **v0.3 商业化** | MongoDB 内置插件补全 + AI 只读助手 → 审批流 + MCP Server + 多模型；安装器/jlink/签名/自动更新；插件市场 UI；文档与验收矩阵 | 6–8 周 |
 
 **切片纪律**：每阶段必须能自己日常使用，禁止"什么都做一半"。
 
@@ -500,7 +502,7 @@ scripts/                 # 构建、jlink、打包、验收
 
 | 编号 | 问题 | 倾向 |
 |---|---|---|
-| O-1 | Mongo 内置还是做成**首个官方可下载插件**（顺便验证发布链路） | 后者更有价值，需你确认 |
+| O-1 | MongoDB 作为内置插件随包分发，还是改为**首个官方可下载插件**（同样走插件链路，用来验证"发布→下载→验签→安装"渠道） | 后者更有价值，需你确认 |
 | O-2 | AG Grid Community 是否够（将来要行分组/透视则需 Enterprise 授权） | 先 CE，遇到瓶颈再评估 |
 | O-3 | 是否要 license/激活与试用期（商业化前提） | 待商业模式确定 |
 | O-4 | 插件市场托管（GitHub Releases / 对象存储 / 自建 CDN） | GitHub 起步 |
